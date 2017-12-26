@@ -23,6 +23,7 @@
 #include "timedata.h"
 #include "txmempool.h"
 #include "util.h"
+#include "net.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
 
@@ -74,6 +75,43 @@ int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParam
     return nNewTime - nOldTime;
 }
 
+//static uint64_t ComputeMaxGeneratedBlockSize(const Config &config,
+//                                             const CBlockIndex *pindexPrev) {
+//    // Block resource limits
+//    // If -blockmaxsize is not given, limit to DEFAULT_MAX_GENERATED_BLOCK_SIZE
+//    // If only one is given, only restrict the specified resource.
+//    // If both are given, restrict both.
+//    uint64_t nMaxGeneratedBlockSize = DEFAULT_MAX_GENERATED_BLOCK_SIZE;
+//    if (IsArgSet("-blockmaxsize")) {
+//        nMaxGeneratedBlockSize =
+//            GetArg("-blockmaxsize", DEFAULT_MAX_GENERATED_BLOCK_SIZE);
+//    }
+//
+//    // Limit size to between 1K and MaxBlockSize-1K for sanity:
+//    nMaxGeneratedBlockSize =
+//        std::max(uint64_t(1000), std::min(config.GetMaxBlockSize() - 1000,
+//                                          nMaxGeneratedBlockSize));
+//
+//    // If UAHF is not activated yet, we also want to limit the max generated
+//    // block size to LEGACY_MAX_BLOCK_SIZE - 1000
+//    if (!IsUAHFenabled(config, pindexPrev)) {
+//        nMaxGeneratedBlockSize =
+//            std::min(LEGACY_MAX_BLOCK_SIZE - 1000, nMaxGeneratedBlockSize);
+//    }
+//
+//    return nMaxGeneratedBlockSize;
+//}
+//
+//static uint64_t ComputeMinGeneratedBlockSize(const Config &config,
+//                                             const CBlockIndex *pindexPrev) {
+//    if (IsUAHFenabled(config, pindexPrev) &&
+//        !IsUAHFenabled(config, pindexPrev->pprev)) {
+//        return LEGACY_MAX_BLOCK_SIZE + 1;
+//    }
+//
+//    return 0;
+//}
+
 BlockAssembler::BlockAssembler(const CChainParams& _chainparams)
     : chainparams(_chainparams)
 {
@@ -121,6 +159,13 @@ void BlockAssembler::resetBlock()
 
     lastFewTxs = 0;
     blockFinished = false;
+}
+
+static const std::vector<unsigned char> getExcessiveBlockSizeSig() {
+    std::string cbmsg = "/EB" + getSubVersionEB(DEFAULT_MAX_BLOCK_SIZE) + "/";
+    const char *cbcstr = cbmsg.c_str();
+    std::vector<unsigned char> vec(cbcstr, cbcstr + cbmsg.size());
+    return vec;
 }
 
 CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
@@ -194,7 +239,7 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
 
     CValidationState state;
     if (!TestBlockValidity(state, chainparams, *pblock, pindexPrev, false, false)) {
-        throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, FormatStateMessage(state)));
+        throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s;nBits=%08x", __func__, FormatStateMessage(state),pblock->nBits));
     }
 
     return pblocktemplate.release();
@@ -229,8 +274,11 @@ bool BlockAssembler::TestPackage(uint64_t packageSize, int64_t packageSigOpsCost
     // TODO: switch to weight-based accounting for packages instead of vsize-based accounting.
     if (nBlockWeight + WITNESS_SCALE_FACTOR * packageSize >= nBlockMaxWeight)
         return false;
-    if (nBlockSigOpsCost + packageSigOpsCost >= MAX_BLOCK_SIGOPS_COST)
+
+    if (nBlockSigOpsCost + packageSigOpsCost >= GetMaxBlockSigOpsCount(nBlockSize + packageSize))
         return false;
+//    if (nBlockSigOpsCost + packageSigOpsCost >= MAX_BLOCK_SIGOPS_COST)
+//        return false;
     return true;
 }
 
@@ -260,6 +308,8 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
 
 bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
 {
+    auto blockSizeWithTx = nBlockSize + ::GetSerializeSize(iter->GetTx(), SER_NETWORK, PROTOCOL_VERSION);
+
     if (nBlockWeight + iter->GetTxWeight() >= nBlockMaxWeight) {
         // If the block is so close to full that no more txs will fit
         // or if we've tried more than 50 times to fill remaining space
@@ -288,16 +338,18 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
             return false;
         }
     }
-
-    if (nBlockSigOpsCost + iter->GetSigOpCost() >= MAX_BLOCK_SIGOPS_COST) {
-        // If the block has room for no more sig ops then
-        // flag that the block is finished
-        if (nBlockSigOpsCost > MAX_BLOCK_SIGOPS_COST - 8) {
+    auto maxBlockSigOps = GetMaxBlockSigOpsCount(blockSizeWithTx);
+    if (nBlockSigOpsCost + iter->GetSigOpCost() >= maxBlockSigOps) {
+        // If the block has room for no more sig ops then flag that the block is
+        // finished.
+        // TODO: We should consider adding another transaction that isn't very
+        // dense in sigops instead of bailing out so easily.
+        if (nBlockSigOpsCost > maxBlockSigOps - 8) {
             blockFinished = true;
             return false;
         }
-        // Otherwise attempt to find another tx with fewer sigops
-        // to put in the block.
+        // Otherwise attempt to find another tx with fewer sigops to put in the
+        // block.
         return false;
     }
 
@@ -603,8 +655,10 @@ void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned
     unsigned int nHeight = pindexPrev->nHeight+1; // Height first in coinbase required for block.version=2
     CMutableTransaction txCoinbase(pblock->vtx[0]);
     txCoinbase.vin[0].scriptSig = (CScript() << nHeight << CScriptNum(nExtraNonce)) + COINBASE_FLAGS;
+    txCoinbase.vin[0].scriptSig = (CScript() << nHeight << CScriptNum(nExtraNonce) << getExcessiveBlockSizeSig()) +COINBASE_FLAGS;
     assert(txCoinbase.vin[0].scriptSig.size() <= 100);
 
     pblock->vtx[0] = txCoinbase;
     pblock->hashMerkleRoot = BlockMerkleRoot(*pblock);
+
 }

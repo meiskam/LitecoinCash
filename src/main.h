@@ -303,6 +303,10 @@ void FlushStateToDisk();
 /** Prune block files and flush state to disk. */
 void PruneAndFlush();
 
+
+bool IsUAHFenabled(const Consensus::Params& consensusparams, const CBlockIndex *pindexPrev);
+bool IsUAHFenabledForCurrentBlock(const Consensus::Params& consensusparams);
+
 /** (try to) add transaction to memory pool **/
 bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
                         bool* pfMissingInputs, bool fOverrideMempoolLimit=false, const CAmount nAbsurdFee=0);

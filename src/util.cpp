@@ -99,8 +99,8 @@ namespace boost {
 
 using namespace std;
 
-const char * const BITCOIN_CONF_FILENAME = "litecoin.conf";
-const char * const BITCOIN_PID_FILENAME = "litecoin.pid";
+const char * const BITCOIN_CONF_FILENAME = "lch.conf";
+const char * const BITCOIN_PID_FILENAME = "lch.pid";
 
 map<string, string> mapArgs;
 map<string, vector<string> > mapMultiArgs;
@@ -461,7 +461,7 @@ boost::filesystem::path GetDefaultDataDir()
     // Unix: ~/.bitcoin
 #ifdef WIN32
     // Windows
-    return GetSpecialFolderPath(CSIDL_APPDATA) / "Litecoin";
+    return GetSpecialFolderPath(CSIDL_APPDATA) / "Lch";
 #else
     fs::path pathRet;
     char* pszHome = getenv("HOME");
@@ -471,10 +471,10 @@ boost::filesystem::path GetDefaultDataDir()
         pathRet = fs::path(pszHome);
 #ifdef MAC_OSX
     // Mac
-    return pathRet / "Library/Application Support/Litecoin";
+    return pathRet / "Library/Application Support/Lch";
 #else
     // Unix
-    return pathRet / ".litecoin";
+    return pathRet / ".lch";
 #endif
 #endif
 }

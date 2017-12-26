@@ -855,4 +855,6 @@ struct AddedNodeInfo
 
 std::vector<AddedNodeInfo> GetAddedNodeInfo();
 
+std::string getSubVersionEB(uint64_t MaxBlockSize);
+std::string userAgent();
 #endif // BITCOIN_NET_H

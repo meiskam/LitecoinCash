@@ -37,6 +37,15 @@ struct BIP9Deployment {
  * Parameters that influence chain consensus.
  */
 struct Params {
+    /** Block height at which UAHF kicks in */
+    int LCHHeight;
+	int LCHInitBlockCount;
+    /** Block height at which OP_RETURN replay protection stops */
+    int antiReplayOpReturnSunsetHeight;
+    /** Committed OP_RETURN value for replay protection */
+    std::vector<uint8_t> antiReplayOpReturnCommitment;
+
+
     uint256 hashGenesisBlock;
     int nSubsidyHalvingInterval;
     /** Used to check majorities for block version upgrade */

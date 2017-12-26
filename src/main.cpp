@@ -37,6 +37,7 @@
 #include "utilstrencodings.h"
 #include "validationinterface.h"
 #include "versionbits.h"
+#include "version.h"
 
 #include <atomic>
 #include <sstream>
@@ -62,6 +63,7 @@ CCriticalSection cs_main;
 
 BlockMap mapBlockIndex;
 CChain chainActive;
+
 CBlockIndex *pindexBestHeader = NULL;
 int64_t nTimeBestReceived = 0;
 CWaitableCriticalSection csBestBlock;
@@ -766,7 +768,21 @@ void EraseOrphansFor(NodeId peer)
     }
     if (nErased > 0) LogPrint("mempool", "Erased %d orphan tx from peer %d\n", nErased, peer);
 }
+static bool IsUAHFenabled(const Consensus::Params& consensusparams, int nHeight) {
+    return nHeight >= consensusparams.LCHHeight;
+}
 
+bool IsUAHFenabled(const Consensus::Params& consensusparams, const CBlockIndex *pindexPrev) {
+    if (pindexPrev == nullptr) {
+        return false;
+    }
+
+    return IsUAHFenabled(consensusparams, pindexPrev->nHeight);
+}
+bool IsUAHFenabledForCurrentBlock(const Consensus::Params& consensusparams) {
+    AssertLockHeld(cs_main);
+    return IsUAHFenabled(consensusparams, chainActive.Tip());
+}
 
 unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
@@ -1118,6 +1134,15 @@ bool CheckTransaction(const CTransaction& tx, CValidationState &state)
                 return state.DoS(10, false, REJECT_INVALID, "bad-txns-prevout-null");
     }
 
+    if (IsUAHFenabled(Params().GetConsensus(), chainActive.Height()) &&
+    		chainActive.Height() <= Params().GetConsensus().antiReplayOpReturnSunsetHeight) {
+        for (const CTxOut &o : tx.vout) {
+            if (o.scriptPubKey.IsCommitment(Params().GetConsensus().antiReplayOpReturnCommitment)) {
+                return state.DoS(10, false, REJECT_INVALID, "bad-txn-replay",
+                                 false, "non playable transaction");
+            }
+        }
+    }
     return true;
 }
 
@@ -1140,6 +1165,9 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetDebugMessage().empty() ? "" : ", "+state.GetDebugMessage(),
         state.GetRejectCode());
 }
+
+
+
 
 bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const CTransaction& tx, bool fLimitFree,
                               bool* pfMissingInputs, bool fOverrideMempoolLimit, const CAmount& nAbsurdFee,
@@ -1522,6 +1550,9 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
             scriptVerifyFlags = GetArg("-promiscuousmempoolflags", scriptVerifyFlags);
         }
 
+        if (IsUAHFenabledForCurrentBlock(chainparams.GetConsensus())) {
+            scriptVerifyFlags |= SCRIPT_ENABLE_SIGHASH_FORKID;
+        }
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
@@ -1546,7 +1577,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState& state, const C
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!CheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true, txdata))
+
+        // SCRIPT_ENABLE_SIGHASH_FORKID is also added as to ensure we do not
+        // filter out transactions using the antireplay feature.
+
+        if (!CheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | SCRIPT_ENABLE_SIGHASH_FORKID, true, txdata))
         {
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
@@ -2420,7 +2455,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         flags |= SCRIPT_VERIFY_CHECKSEQUENCEVERIFY;
         nLockTimeFlags |= LOCKTIME_VERIFY_SEQUENCE;
     }
-
+    // If the UAHF is enabled, we start accepting replay protected txns
+    if (IsUAHFenabled(chainparams.GetConsensus(),pindex->pprev)) {
+        flags |= SCRIPT_ENABLE_SIGHASH_FORKID;
+    }
     // Start enforcing WITNESS rules using versionbits logic.
     if (IsWitnessEnabled(pindex->pprev, chainparams.GetConsensus())) {
         flags |= SCRIPT_VERIFY_WITNESS;
@@ -2785,6 +2823,15 @@ bool static DisconnectTip(CValidationState& state, const CChainParams& chainpara
     if (!FlushStateToDisk(state, FLUSH_STATE_IF_NEEDED))
         return false;
 
+    // If this block was the activation of the UAHF, then we need to remove
+    // transactions that are valid only on the HF chain. There is no easy way to
+    // do this so we'll just discard the whole mempool and then add the
+    // transaction of the block we just disconnected back.
+    const Consensus::Params& consensusParams = Params().GetConsensus();
+    if (IsUAHFenabled(consensusParams, pindexDelete) &&
+        !IsUAHFenabled(consensusParams, pindexDelete->pprev)) {
+        mempool.clear();
+    }
     if (!fBare) {
         // Resurrect mempool transactions from the disconnected block.
         std::vector<uint256> vHashUpdate;
@@ -3471,8 +3518,9 @@ static bool CheckIndexAgainstCheckpoint(const CBlockIndex* pindexPrev, CValidati
 
 bool IsWitnessEnabled(const CBlockIndex* pindexPrev, const Consensus::Params& params)
 {
-    LOCK(cs_main);
-    return (VersionBitsState(pindexPrev, params, Consensus::DEPLOYMENT_SEGWIT, versionbitscache) == THRESHOLD_ACTIVE);
+	return false;
+//    LOCK(cs_main);
+//    return (VersionBitsState(pindexPrev, params, Consensus::DEPLOYMENT_SEGWIT, versionbitscache) == THRESHOLD_ACTIVE);
 }
 
 // Compute at which vout of the block's coinbase transaction the witness
@@ -3530,9 +3578,14 @@ std::vector<unsigned char> GenerateCoinbaseCommitment(CBlock& block, const CBloc
 bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, const Consensus::Params& consensusParams, CBlockIndex * const pindexPrev, int64_t nAdjustedTime)
 {
     // Check proof of work
-    if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
-        return state.DoS(100, false, REJECT_INVALID, "bad-diffbits", false, "incorrect proof of work");
-
+    if (pindexPrev->nHeight > consensusParams.LCHHeight + consensusParams.LCHInitBlockCount)
+    {
+		if ( block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
+		{
+			LogPrintf("Peer ffffssssss51----%x------%x\n",block.nBits,GetNextWorkRequired(pindexPrev, &block, consensusParams));
+			return state.DoS(100, false, REJECT_INVALID, "bad-diffbits", false, "incorrect proof of work");
+		}
+    }
     // Check timestamp against prev
     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
         return state.Invalid(false, REJECT_INVALID, "time-too-old", "block's timestamp is too early");
@@ -3586,6 +3639,30 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
     if (VersionBitsState(pindexPrev, consensusParams, Consensus::DEPLOYMENT_CSV, versionbitscache) == THRESHOLD_ACTIVE) {
         nLockTimeFlags |= LOCKTIME_MEDIAN_TIME_PAST;
     }
+
+    if (IsUAHFenabled(consensusParams, pindexPrev)) {
+        // If UAHF is enabled for the curent block, but not for the previous
+        // block, we must check that the block is larger than 1MB.
+//        if (!IsUAHFenabled(consensusParams, pindexPrev->pprev)) {
+//            const uint64_t currentBlockSize =
+//                ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION);
+//            if (currentBlockSize <= LEGACY_MAX_BLOCK_SIZE) {
+//                return state.DoS(100, false, REJECT_INVALID,
+//                                 "bad-blk-too-small11", false,
+//                                 "size limits failed");
+//            }
+//        }
+    } else {
+        // When UAHF is not enabled, block cannot be bigger than
+        // LEGACY_MAX_BLOCK_SIZE .
+        const uint64_t currentBlockSize =
+            ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION);
+        if (currentBlockSize > LEGACY_MAX_BLOCK_SIZE) {
+            return state.DoS(100, false, REJECT_INVALID, "bad-blk-length22",
+                             false, "size limits failed");
+        }
+    }
+
 
     int64_t nLockTimeCutoff = (nLockTimeFlags & LOCKTIME_MEDIAN_TIME_PAST)
                               ? pindexPrev->GetMedianTimePast()
@@ -3684,6 +3761,7 @@ static bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state
     uint256 hash = block.GetHash();
     BlockMap::iterator miSelf = mapBlockIndex.find(hash);
     CBlockIndex *pindex = NULL;
+
     if (hash != chainparams.GetConsensus().hashGenesisBlock) {
 
         if (miSelf != mapBlockIndex.end()) {
@@ -4967,7 +5045,8 @@ uint32_t GetFetchFlags(CNode* pfrom, CBlockIndex* pprev, const Consensus::Params
 
 bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived, const CChainParams& chainparams)
 {
-    LogPrint("net", "received: %s (%u bytes) peer=%d\n", SanitizeString(strCommand), vRecv.size(), pfrom->id);
+    LogPrint("net", "received: %s (%u bytes) peer=%d .version= %d\n", SanitizeString(strCommand), vRecv.size(), pfrom->id, pfrom->nVersion);
+
     if (mapArgs.count("-dropmessagestest") && GetRand(atoi(mapArgs["-dropmessagestest"])) == 0)
     {
         LogPrintf("dropmessagestest DROPPING RECV MESSAGE\n");
@@ -4999,6 +5078,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             pfrom->fDisconnect = true;
         }
 
+
         // Each connection can only send one version message
         if (pfrom->nVersion != 0)
         {
@@ -5007,7 +5087,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             Misbehaving(pfrom->GetId(), 1);
             return false;
         }
-
         int64_t nTime;
         CAddress addrMe;
         CAddress addrFrom;
@@ -5036,6 +5115,11 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                                strprintf("Version must be %d or greater", MIN_PEER_PROTO_VERSION));
             pfrom->fDisconnect = true;
             return false;
+        }
+
+        if (IsUAHFenabled(Params().GetConsensus(), chainActive.Height()) && pfrom->nVersion != 80015)
+        {
+        		return error("invalid header received.....");
         }
 
         if (pfrom->nVersion == 10300)
@@ -5143,6 +5227,11 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         Misbehaving(pfrom->GetId(), 1);
         return false;
     }
+//filter old message
+    else if (pfrom->nVersion != LCH_FORK_VERSION)
+	{
+		return error("invalid message received");
+	}
 
 
     else if (strCommand == NetMsgType::VERACK)
@@ -5939,7 +6028,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
     else if (strCommand == NetMsgType::HEADERS && !fImporting && !fReindex) // Ignore headers received while importing
     {
         std::vector<CBlockHeader> headers;
-
         // Bypass the normal CBlock deserialization, as we don't want to risk deserializing 2000 full blocks.
         unsigned int nCount = ReadCompactSize(vRecv);
         if (nCount > MAX_HEADERS_RESULTS) {
@@ -5962,7 +6050,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         }
 
         CNodeState *nodestate = State(pfrom->GetId());
-
         // If this looks like it could be a block announcement (nCount <
         // MAX_BLOCKS_TO_ANNOUNCE), use special logic for handling headers that
         // don't connect:
@@ -5989,14 +6076,19 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             }
             return true;
         }
-
         CBlockIndex *pindexLast = NULL;
         BOOST_FOREACH(const CBlockHeader& header, headers) {
             CValidationState state;
+
             if (pindexLast != NULL && header.hashPrevBlock != pindexLast->GetBlockHash()) {
                 Misbehaving(pfrom->GetId(), 20);
                 return error("non-continuous headers sequence");
             }
+//            if (pindexLast != NULL && IsUAHFenabled(Params().GetConsensus(), pindexLast->nHeight) && header.nVersion != LCH_FORK_VERSION)
+//            {
+//            		return error("invalid header received");
+//            }
+
             if (!AcceptBlockHeader(header, state, chainparams, &pindexLast)) {
                 int nDoS;
                 if (state.IsInvalid(nDoS)) {
@@ -6006,6 +6098,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                 }
             }
         }
+        LogPrintf("Peer %d sss22sss\n", pfrom->id);
 
         if (nodestate->nUnconnectingHeaders > 0) {
             LogPrint("net", "peer=%d: resetting nUnconnectingHeaders (%d -> 0)\n", pfrom->id, nodestate->nUnconnectingHeaders);
@@ -6014,6 +6107,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
         assert(pindexLast);
         UpdateBlockAvailability(pfrom->GetId(), pindexLast->GetBlockHash());
+        LogPrintf("Peer %d sss33sss\n", pfrom->id);
 
         if (nCount == MAX_HEADERS_RESULTS) {
             // Headers message had its maximum size; the peer may have more headers.
@@ -6022,6 +6116,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             LogPrint("net", "more getheaders (%d) to end to peer=%d (startheight:%d)\n", pindexLast->nHeight, pfrom->id, pfrom->nStartingHeight);
             pfrom->PushMessage(NetMsgType::GETHEADERS, chainActive.GetLocator(pindexLast), uint256());
         }
+        LogPrintf("Peer %d sss44sss\n", pfrom->id);
 
         bool fCanDirectFetch = CanDirectFetch(chainparams.GetConsensus());
         // If this set of headers is valid and ends in a block with at least as

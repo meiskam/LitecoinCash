@@ -12,9 +12,11 @@
 #include "pubkey.h"
 #include "script/script.h"
 #include "uint256.h"
+#include "chain.h"
+static const uint64_t LCH_FORK_BLOCK_NUM = 1338540;
 
 using namespace std;
-
+extern CChain chainActive;
 typedef vector<unsigned char> valtype;
 
 namespace {
@@ -183,11 +185,19 @@ bool static IsLowDERSignature(const valtype &vchSig, ScriptError* serror) {
     return true;
 }
 
+static uint32_t GetHashType(const valtype &vchSig) {
+    if (vchSig.size() == 0) {
+        return 0;
+    }
+
+    return vchSig[vchSig.size() - 1];
+}
+
 bool static IsDefinedHashtypeSignature(const valtype &vchSig) {
     if (vchSig.size() == 0) {
         return false;
     }
-    unsigned char nHashType = vchSig[vchSig.size() - 1] & (~(SIGHASH_ANYONECANPAY));
+    unsigned char nHashType = vchSig[vchSig.size() - 1] & (~(SIGHASH_ANYONECANPAY | SIGHASH_FORKID));
     if (nHashType < SIGHASH_ALL || nHashType > SIGHASH_SINGLE)
         return false;
 
@@ -890,6 +900,33 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                     // Subset of script starting at the most recent codeseparator
                     CScript scriptCode(pbegincodehash, pend);
 
+                    // Drop the signature in scripts when SIGHASH_FORKID is not used.
+                    // Drop the signature in scripts when SIGHASH_FORKID is not used.
+//                    if(chainActive.Height() >= LCH_FORK_BLOCK_NUM)
+//                    {
+//                        if (!(flags & SCRIPT_ENABLE_SIGHASH_FORKID) ||
+//                            !(vchSig[vchSig.size() - 1] & SIGHASH_FORKID)) {
+//                            //scriptCode.FindAndDelete(CScript(vchSig));
+//                             return set_error(serror, SCRIPT_ERR_CHECKSIGVERIFY);
+//                        }
+//                    }
+//
+//                    if(chainActive.Height() < LCH_FORK_BLOCK_NUM)
+//                    {
+//                        if (vchSig[vchSig.size() - 1] & SIGHASH_FORKID) {
+//                            return set_error(serror, SCRIPT_ERR_CHECKSIGVERIFY);
+//                        }
+//                    }
+
+                    uint32_t nHashType = GetHashType(vchSig);
+                    if (nHashType & SIGHASH_FORKID) {
+                        if (!(flags & SCRIPT_ENABLE_SIGHASH_FORKID))
+                            return set_error(serror,SCRIPT_ERR_ILLEGAL_FORKID);
+                    } else {
+                        scriptCode.FindAndDelete(CScript(vchSig));
+                    }
+
+
                     // Drop the signature in pre-segwit scripts but not segwit scripts
                     if (sigversion == SIGVERSION_BASE) {
                         scriptCode.FindAndDelete(CScript(vchSig));
@@ -955,6 +992,17 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                     for (int k = 0; k < nSigsCount; k++)
                     {
                         valtype& vchSig = stacktop(-isig-k);
+                        // Drop the signature in scripts when SIGHASH_FORKID
+                        // is not used.
+                        uint32_t nHashType = GetHashType(vchSig);
+                        if (nHashType & SIGHASH_FORKID) {
+                            if (!(flags & SCRIPT_ENABLE_SIGHASH_FORKID))
+                                return set_error(serror, SCRIPT_ERR_ILLEGAL_FORKID);
+                        } else {
+                            scriptCode.FindAndDelete(CScript(vchSig));
+                        }
+
+
                         if (sigversion == SIGVERSION_BASE) {
                             scriptCode.FindAndDelete(CScript(vchSig));
                         }
@@ -1178,6 +1226,50 @@ PrecomputedTransactionData::PrecomputedTransactionData(const CTransaction& txTo)
 uint256 SignatureHash(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache)
 {
     if (sigversion == SIGVERSION_WITNESS_V0) {
+        uint256 hashPrevouts;
+        uint256 hashSequence;
+        uint256 hashOutputs;
+
+        if (!(nHashType & SIGHASH_ANYONECANPAY)) {
+            hashPrevouts = cache ? cache->hashPrevouts : GetPrevoutHash(txTo);
+        }
+
+        if (!(nHashType & SIGHASH_ANYONECANPAY) && (nHashType & 0x1f) != SIGHASH_SINGLE && (nHashType & 0x1f) != SIGHASH_NONE) {
+            hashSequence = cache ? cache->hashSequence : GetSequenceHash(txTo);
+        }
+
+
+        if ((nHashType & 0x1f) != SIGHASH_SINGLE && (nHashType & 0x1f) != SIGHASH_NONE) {
+            hashOutputs = cache ? cache->hashOutputs : GetOutputsHash(txTo);
+        } else if ((nHashType & 0x1f) == SIGHASH_SINGLE && nIn < txTo.vout.size()) {
+            CHashWriter ss(SER_GETHASH, 0);
+            ss << txTo.vout[nIn];
+            hashOutputs = ss.GetHash();
+        }
+
+        CHashWriter ss(SER_GETHASH, 0);
+        // Version
+        ss << txTo.nVersion;
+        // Input prevouts/nSequence (none/all, depending on flags)
+        ss << hashPrevouts;
+        ss << hashSequence;
+        // The input being signed (replacing the scriptSig with scriptCode + amount)
+        // The prevout may already be contained in hashPrevout, and the nSequence
+        // may already be contain in hashSequence.
+        ss << txTo.vin[nIn].prevout;
+        ss << static_cast<const CScriptBase&>(scriptCode);
+        ss << amount;
+        ss << txTo.vin[nIn].nSequence;
+        // Outputs (none/one/all, depending on flags)
+        ss << hashOutputs;
+        // Locktime
+        ss << txTo.nLockTime;
+        // Sighash type
+        ss << nHashType;
+
+        return ss.GetHash();
+    }
+    if (nHashType & SIGHASH_FORKID) {
         uint256 hashPrevouts;
         uint256 hashSequence;
         uint256 hashOutputs;
