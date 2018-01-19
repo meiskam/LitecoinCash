@@ -16,6 +16,15 @@
 
 #include "chainparamsseeds.h"
 
+// Far into the future.
+static const std::string ANTI_REPLAY_COMMITMENT =
+    "Bitcoin: A Peer-to-Peer Electronic Cash System";
+
+static std::vector<unsigned char> GetAntiReplayCommitment() {
+    return std::vector<unsigned char>(std::begin(ANTI_REPLAY_COMMITMENT),
+                                      std::end(ANTI_REPLAY_COMMITMENT));
+}
+
 static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
     CMutableTransaction txNew;
@@ -77,6 +86,13 @@ public:
         consensus.BIP34Height = 710000;
         consensus.BIP34Hash = uint256S("fa09d204a83a768ed5a7c8d441fa62f2043abf420cff1226c7b4329aeb9d51cf");
         consensus.powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); 
+        consensus.powLimitFork = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        consensus.antiReplayOpReturnSunsetHeight = 1520000;
+        consensus.antiReplayOpReturnCommitment = GetAntiReplayCommitment();
+        // hard fork
+        consensus.LCHHeight = 1338540 ;
+		consensus.LCHInitBlockCount = 168000;
+
         consensus.nPowTargetTimespan = 3.5 * 24 * 60 * 60; // 3.5 days
         consensus.nPowTargetSpacing = 2.5 * 60;
         consensus.fPowAllowMinDifficultyBlocks = false;
@@ -118,11 +134,11 @@ public:
         assert(genesis.hashMerkleRoot == uint256S("0x97ddfbbae6be97fd6cdf3e7ca13232a3afff2353e29badfab7f73011edd4ced9"));
 
         // Note that of those with the service bits flag, most only support a subset of possible options
-        vSeeds.push_back(CDNSSeedData("loshan.co.uk", "seed-a.litecoin.loshan.co.uk", true));
-        vSeeds.push_back(CDNSSeedData("thrasher.io", "dnsseed.thrasher.io", true));
-        vSeeds.push_back(CDNSSeedData("litecointools.com", "dnsseed.litecointools.com"));
-        vSeeds.push_back(CDNSSeedData("litecoinpool.org", "dnsseed.litecoinpool.org"));
-        vSeeds.push_back(CDNSSeedData("koin-project.com", "dnsseed.koin-project.com"));
+        vSeeds.push_back(CDNSSeedData("litecash.info", "dnsseed1.litecash.info"));
+        vSeeds.push_back(CDNSSeedData("litecash.tech", "dnsseed1.litecash.tech"));
+//        vSeeds.push_back(CDNSSeedData("litecointools.com", "dnsseed.litecointools.com", true));
+//        vSeeds.push_back(CDNSSeedData("litecoinpool.org", "dnsseed.litecoinpool.org", true));
+//        vSeeds.push_back(CDNSSeedData("koin-project.com", "dnsseed.koin-project.com"));
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,48);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
@@ -180,6 +196,12 @@ public:
         consensus.nMajorityWindow = 100;
         consensus.BIP34Height = -1;
         consensus.BIP34Hash = uint256S("");
+        consensus.antiReplayOpReturnSunsetHeight = 1520000;
+        consensus.antiReplayOpReturnCommitment = GetAntiReplayCommitment();
+        // hard fork
+        consensus.LCHHeight = 1338540 ;
+		consensus.LCHInitBlockCount = 168000;
+
         consensus.powLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.nPowTargetTimespan = 3.5 * 24 * 60 * 60; // 3.5 days
         consensus.nPowTargetSpacing = 2.5 * 60;
@@ -219,9 +241,9 @@ public:
         vFixedSeeds.clear();
         vSeeds.clear();
         // nodes with support for servicebits filtering should be at the top
-        vSeeds.push_back(CDNSSeedData("litecointools.com", "testnet-seed.litecointools.com"));
-        vSeeds.push_back(CDNSSeedData("loshan.co.uk", "seed-b.litecoin.loshan.co.uk", true));
-        vSeeds.push_back(CDNSSeedData("thrasher.io", "dnsseed-testnet.thrasher.io", true));
+        vSeeds.push_back(CDNSSeedData("litecash.info", "testnet-seed.litecash.info"));
+        vSeeds.push_back(CDNSSeedData("litecash.tech", "testnet-seed.litecash.info", true));
+//        vSeeds.push_back(CDNSSeedData("thrasher.io", "dnsseed-testnet.thrasher.io", true));
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,111);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,196);
@@ -264,6 +286,12 @@ public:
         consensus.nMajorityWindow = 1000;
         consensus.BIP34Height = -1; // BIP34 has not necessarily activated on regtest
         consensus.BIP34Hash = uint256();
+        consensus.antiReplayOpReturnSunsetHeight = 1520000;
+        consensus.antiReplayOpReturnCommitment = GetAntiReplayCommitment();
+        // hard fork
+        consensus.LCHHeight = 1338540 ;
+		consensus.LCHInitBlockCount = 168000;
+
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.nPowTargetTimespan = 3.5 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = 2.5 * 60;

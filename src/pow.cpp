@@ -13,11 +13,15 @@
 
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
 {
+	arith_uint256 nPow;
+	nPow.SetCompact(pindexLast->nBits);
+
     unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
 
     // Genesis block
     if (pindexLast == NULL)
         return nProofOfWorkLimit;
+    const arith_uint256 bnPowLimit = UintToArith256(params.powLimitFork);
 
     // Only change once per difficulty adjustment interval
     if ((pindexLast->nHeight+1) % params.DifficultyAdjustmentInterval() != 0)
@@ -38,13 +42,31 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
                 return pindex->nBits;
             }
         }
+        // If producing the last 6 block took less than 1h, we keep the same
+        // difficulty.
+        if (pindexLast->nHeight >= params.LCHHeight && pindexLast->nHeight  <= params.LCHHeight + params.LCHInitBlockCount)
+        {
+        	    	return bnPowLimit.GetCompact();
+        }
+	    arith_uint256 bnNew;
+
+	    if (pindexLast->nHeight  >= 1506585 && pindexLast->nHeight  <= params.LCHHeight + params.LCHInitBlockCount + params.DifficultyAdjustmentInterval())
+	    {
+	    		//we adjustment difficulty  to a reasonable level.
+	    		bnNew.SetCompact(0x1aa8946b);
+
+	    		return bnNew.GetCompact();
+	    }
+
         return pindexLast->nBits;
     }
+
 
     // Go back by what we want to be 14 days worth of blocks
     // Litecoin: This fixes an issue where a 51% attack can change difficulty at will.
     // Go back the full period unless it's the first retarget after genesis. Code courtesy of Art Forz
     int blockstogoback = params.DifficultyAdjustmentInterval()-1;
+
     if ((pindexLast->nHeight+1) != params.DifficultyAdjustmentInterval())
         blockstogoback = params.DifficultyAdjustmentInterval();
 
@@ -54,14 +76,16 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         pindexFirst = pindexFirst->pprev;
 
     assert(pindexFirst);
-
     return CalculateNextWorkRequired(pindexLast, pindexFirst->GetBlockTime(), params);
 }
 
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params& params)
 {
-    if (params.fPowNoRetargeting)
-        return pindexLast->nBits;
+	if (pindexLast->nHeight >= params.LCHHeight && pindexLast->nHeight  <= params.LCHHeight + params.LCHInitBlockCount)//pindexLast->nHeight > params.LCHHeight
+	{
+        const arith_uint256 bnPowLimit = UintToArith256(params.powLimitFork);
+        return (bnPowLimit.GetCompact());;
+	}
 
     // Limit adjustment step
     int64_t nActualTimespan = pindexLast->GetBlockTime() - nFirstBlockTime;
@@ -69,10 +93,10 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
         nActualTimespan = params.nPowTargetTimespan/4;
     if (nActualTimespan > params.nPowTargetTimespan*4)
         nActualTimespan = params.nPowTargetTimespan*4;
-
     // Retarget
     arith_uint256 bnNew;
     arith_uint256 bnOld;
+
     bnNew.SetCompact(pindexLast->nBits);
     bnOld = bnNew;
     // Litecoin: intermediate uint256 can overflow by 1 bit
